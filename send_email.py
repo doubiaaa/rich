@@ -6,28 +6,31 @@ from email.header import Header
 from datetime import datetime
 
 def send_email(subject, content):
-    """发送邮件，配置从环境变量读取"""
+    """发送邮件，支持多个收件人（用逗号分隔）"""
     smtp_server = os.environ.get('SMTP_SERVER')
     smtp_port = int(os.environ.get('SMTP_PORT', 587))
     sender = os.environ.get('EMAIL_SENDER')
     password = os.environ.get('EMAIL_PASSWORD')
-    receiver = os.environ.get('EMAIL_RECEIVER')
+    receiver_str = os.environ.get('EMAIL_RECEIVER')
     
-    if not all([smtp_server, sender, password, receiver]):
+    if not all([smtp_server, sender, password, receiver_str]):
         print("邮件配置缺失，请检查环境变量")
         return False
+    
+    # 支持多个收件人，用逗号分隔（支持空格）
+    receivers = [addr.strip() for addr in receiver_str.split(',') if addr.strip()]
     
     msg = MIMEText(content, 'plain', 'utf-8')
     msg['Subject'] = Header(subject, 'utf-8')
     msg['From'] = sender
-    msg['To'] = receiver
+    msg['To'] = ', '.join(receivers)  # 显示在邮件头部
     
     try:
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
             server.login(sender, password)
-            server.sendmail(sender, [receiver], msg.as_string())
-        print("邮件发送成功")
+            server.sendmail(sender, receivers, msg.as_string())
+        print(f"邮件发送成功，收件人: {receivers}")
         return True
     except Exception as e:
         print(f"邮件发送失败: {e}")
