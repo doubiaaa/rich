@@ -2,14 +2,12 @@ name: 尾盘选股自动运行
 
 on:
   schedule:
-    # 每天北京时间 14:45 运行（UTC 时间 6:45）
-    - cron: '45 6 * * 1-5'
-  workflow_dispatch:  # 允许手动触发
+    - cron: '45 6 * * 1-5'     # 每日14:45（北京时间）运行
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -22,30 +20,18 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      - name: 清理旧结果
+        run: rm -f result.json
+
       - name: 运行选股脚本
         run: python main.py
-        # 脚本会生成 result.json 文件
 
-      - name: 推送结果到微信（Server酱）
-        # 无论脚本是否成功，都尝试推送（若脚本失败，result.json 可能不存在）
-        if: always()
-        run: |
-          # 检查 result.json 是否存在
-          if [ -f result.json ]; then
-            # 构建推送标题
-            TITLE="尾盘选股结果 $(date '+%Y-%m-%d %H:%M')"
-            # 提取候选股票信息（如果没有候选，则显示无候选）
-            CONTENT=$(jq -r '.candidates[] | "\(.名称)(\(.代码)) 涨幅:\(.涨跌幅)% 成交额:\(.成交额/100000000)亿 板块:\(.板块)"' result.json | paste -sd '\n' -)
-            if [ -z "$CONTENT" ]; then
-              CONTENT="今日无符合条件的候选票"
-            fi
-            # 发送到 Server酱
-            curl -X POST "https://sctapi.ftqq.com/${{ secrets.SERVERCHAN_KEY }}.send" \
-              -d "title=$TITLE" \
-              -d "desp=$CONTENT"
-          else
-            # 没有结果文件，发送错误提示
-            curl -X POST "https://sctapi.ftqq.com/${{ secrets.SERVERCHAN_KEY }}.send" \
-              -d "title=选股脚本异常" \
-              -d "desp=未生成 result.json 文件，请检查脚本运行日志"
-          fi
+      - name: 发送邮件通知
+        if: always()   # 即使脚本失败也尝试发送（如果有 result.json）
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python send_email.py
