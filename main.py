@@ -8,7 +8,6 @@ import os
 import json
 import warnings
 
-# 忽略无关警告
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # ========== 参数配置 ==========
@@ -23,18 +22,15 @@ CONFIG = {
     "MIN_TURNOVER": 5,              # 最小换手率(%)
     "MAX_TURNOVER": 25,             # 最大换手率(%)
     "EXCLUDE_BOARDS": ['688', '8'], # 排除科创板、北交所
-    "TOP_N": 3,                     # 每个板块最多输出几只候选
-    "LOG_DIR": "trade_logs",        # 日志目录
-    "MAX_CONCEPTS": 50,             # 最多分析的概念板块数量
+    "TOP_N": 3,
+    "LOG_DIR": "trade_logs",
+    "MAX_CONCEPTS": 50,
 }
 
-# 结果存储（供JSON输出）
-all_candidates = []
+all_candidates = []  # 全局变量，用于保存结果
 
 def is_trading_time():
-    """判断当前是否为交易时段（9:30-11:30, 13:00-15:00）"""
     now = datetime.now()
-    # 周末跳过
     if now.weekday() >= 5:
         return False
     current_time = now.time()
@@ -47,7 +43,6 @@ def is_trading_time():
     return False
 
 def log(msg, print_console=True):
-    """记录日志（控制台+文件）"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_msg = f"[{timestamp}] {msg}"
     if print_console:
@@ -58,7 +53,6 @@ def log(msg, print_console=True):
         f.write(log_msg + '\n')
 
 def safe_request(func, *args, **kwargs):
-    """带重试的请求封装"""
     for i in range(3):
         try:
             return func(*args, **kwargs)
@@ -68,16 +62,13 @@ def safe_request(func, *args, **kwargs):
     return None
 
 def get_all_stocks():
-    """获取所有A股实时行情（东方财富源）"""
     if not is_trading_time():
         log("当前非交易时段，无法获取实时行情，请于交易时段（9:30-15:00）运行")
         return None
     df = safe_request(ak.stock_zh_a_spot_em)
     if df is None:
         return None
-    # 过滤科创板、北交所
     df = df[~df['代码'].str.startswith(tuple(CONFIG["EXCLUDE_BOARDS"]))]
-    # 保留需要的列
     df = df[['代码', '名称', '最新价', '涨跌幅', '成交额', '换手率', '流通市值']]
     for col in ['涨跌幅', '成交额', '换手率', '流通市值']:
         if col in df.columns:
@@ -86,7 +77,6 @@ def get_all_stocks():
     return df
 
 def get_board_heat(stock_df):
-    """分析板块热度：统计每个概念的涨停家数和平均涨幅"""
     concept_list = safe_request(ak.stock_board_concept_name_em)
     if concept_list is None:
         return []
@@ -118,7 +108,6 @@ def get_board_heat(stock_df):
     return hot_boards
 
 def filter_stocks_in_board(board, stock_df):
-    """在板块内筛选符合条件的个股"""
     stocks = board['stocks'].copy()
     condition = (
         (stocks['流通市值'] >= CONFIG["MIN_MARKET_CAP"] * 1e8) &
@@ -139,7 +128,6 @@ def filter_stocks_in_board(board, stock_df):
     return filtered.to_dict('records')
 
 def get_minute_line(code):
-    """获取分时数据（可选，用于辅助判断）"""
     try:
         trade_date = datetime.now().strftime('%Y%m%d')
         df = safe_request(ak.stock_zh_a_tick_tx, code=code, trade_date=trade_date)
@@ -201,9 +189,10 @@ def main():
     log("\n请人工复核分时图（白线是否在黄线上方，尾盘无跳水），符合条件的14:55买入。")
     log("========== 选股完成 ==========\n")
 
-    # 输出结果到JSON文件（供GitHub Actions推送）
+    # 输出结果到JSON文件（供Server酱推送）
     result = {
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "has_candidates": len(all_candidates) > 0,
         "candidates": all_candidates
     }
     with open("result.json", "w", encoding="utf-8") as f:
