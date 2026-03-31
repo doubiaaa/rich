@@ -22,12 +22,12 @@ CONFIG = {
     "MIN_TURNOVER": 5,              # 最小换手率(%)
     "MAX_TURNOVER": 25,             # 最大换手率(%)
     "EXCLUDE_BOARDS": ['688', '8'], # 排除科创板、北交所
-    "TOP_N": 3,
-    "LOG_DIR": "trade_logs",
-    "MAX_CONCEPTS": 50,
+    "TOP_N": 3,                     # 每个板块最多输出几只候选
+    "LOG_DIR": "trade_logs",        # 日志目录
+    "MAX_CONCEPTS": 50,             # 最多分析的概念板块数量
 }
 
-all_candidates = []  # 全局变量，用于保存结果
+all_candidates = []  # 全局变量，保存所有候选票
 
 def is_trading_time():
     now = datetime.now()
@@ -107,7 +107,48 @@ def get_board_heat(stock_df):
     hot_boards.sort(key=lambda x: x['avg_pct'], reverse=True)
     return hot_boards
 
+def calculate_score(stock, board, rank_in_board):
+    """计算个股综合得分（满分10分）"""
+    score = 0
+    # 1. 板块涨停家数 (0-2)
+    limit_cnt = board['limit_count']
+    if limit_cnt >= 10:
+        score += 2
+    elif limit_cnt >= 7:
+        score += 1.5
+    elif limit_cnt >= 5:
+        score += 1
+    # 2. 板块平均涨幅 (0-2)
+    avg_pct = board['avg_pct']
+    if avg_pct >= 5:
+        score += 2
+    elif avg_pct >= 3.5:
+        score += 1.5
+    elif avg_pct >= 2.5:
+        score += 1
+    # 3. 个股成交额排名 (0-2)  rank_in_board: 1,2,3
+    if rank_in_board == 1:
+        score += 2
+    elif rank_in_board == 2:
+        score += 1.5
+    else:
+        score += 1
+    # 4. 个股涨幅 (0-2)
+    pct = stock['涨跌幅']
+    if 3 <= pct <= 6:
+        score += 2
+    elif 0 <= pct < 3 or 6 < pct <= 8:
+        score += 1
+    # 5. 个股换手率 (0-2)
+    turnover = stock['换手率']
+    if 10 <= turnover <= 20:
+        score += 2
+    elif 5 <= turnover < 10 or 20 < turnover <= 25:
+        score += 1
+    return score
+
 def filter_stocks_in_board(board, stock_df):
+    """在板块内筛选符合条件的个股，并计算得分"""
     stocks = board['stocks'].copy()
     condition = (
         (stocks['流通市值'] >= CONFIG["MIN_MARKET_CAP"] * 1e8) &
@@ -121,11 +162,19 @@ def filter_stocks_in_board(board, stock_df):
     filtered = stocks[condition].copy()
     if len(filtered) == 0:
         return []
+    # 按成交额排序，取前N
     filtered = filtered.sort_values('成交额', ascending=False).head(CONFIG["TOP_N"])
-    filtered['板块'] = board['name']
-    filtered['板块平均涨幅'] = board['avg_pct']
-    filtered['板块涨停家数'] = board['limit_count']
-    return filtered.to_dict('records')
+    # 添加板块信息并计算得分
+    results = []
+    for idx, (_, row) in enumerate(filtered.iterrows(), start=1):
+        row_dict = row.to_dict()
+        row_dict['板块'] = board['name']
+        row_dict['板块平均涨幅'] = board['avg_pct']
+        row_dict['板块涨停家数'] = board['limit_count']
+        row_dict['板块内排名'] = idx
+        row_dict['得分'] = calculate_score(row_dict, board, idx)
+        results.append(row_dict)
+    return results
 
 def get_minute_line(code):
     try:
@@ -168,13 +217,17 @@ def main():
     if not all_candidates:
         log("所有板块内均无符合条件的个股，今日无交易")
         return
-    all_candidates.sort(key=lambda x: x['成交额'], reverse=True)
-    log("\n=== 今日尾盘候选票（需人工复核分时） ===")
+
+    # 按综合得分排序，得分相同则成交额大的优先
+    all_candidates.sort(key=lambda x: (x['得分'], x['成交额']), reverse=True)
+
+    log("\n=== 今日尾盘候选票（按推荐优先级排序） ===")
     for c in all_candidates:
         log(f"{c['名称']}({c['代码']}) 板块:{c['板块']} "
             f"涨幅:{c['涨跌幅']:.2f}% 成交额:{c['成交额']/1e8:.1f}亿 "
-            f"换手:{c['换手率']:.1f}% 市值:{c['流通市值']/1e8:.1f}亿")
-    # 可选：获取前3只的分时数据
+            f"换手:{c['换手率']:.1f}% 得分:{c['得分']:.1f}")
+
+    # 获取前3只的分时数据
     log("\n正在获取分时数据（仅前3名），请稍候...")
     for c in all_candidates[:3]:
         minute = get_minute_line(c['代码'])
@@ -186,14 +239,16 @@ def main():
                 log(f"    ✗ 分时形态一般，建议放弃")
         else:
             log(f"  {c['名称']} 分时数据获取失败，请人工查看")
+
     log("\n请人工复核分时图（白线是否在黄线上方，尾盘无跳水），符合条件的14:55买入。")
     log("========== 选股完成 ==========\n")
 
-    # 输出结果到JSON文件（供Server酱推送）
+    # 输出结果到JSON文件
     result = {
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "has_candidates": len(all_candidates) > 0,
-        "candidates": all_candidates
+        "candidates": all_candidates,
+        "top_recommend": all_candidates[0] if all_candidates else None
     }
     with open("result.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
