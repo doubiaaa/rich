@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.6 (最强板块唯一推荐 + 分时 gate + 全仓指令输出)
+版本：v2.7 (分时失败不通过 + 量比硬过滤 + 大市值上限1000亿)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -149,7 +149,7 @@ def get_dynamic_config(market_vol):
             "MIN_BOARD_STOCKS": 8,
             "MIN_BOARD_PCT": 3.0,
             "MIN_MARKET_CAP": 100,       # 亿
-            "MAX_MARKET_CAP": float('inf'),
+            "MAX_MARKET_CAP": 1000,      # 亿，避免超大盘弹性过低
             "MAX_CHANGE_PCT": 8,
             "MIN_TURNOVER": 2,
             "MAX_TURNOVER": 15,
@@ -314,6 +314,7 @@ def calculate_score(stock, board, rank_in_board):
 def filter_stocks_in_board(board, stock_df):
     """在板块内筛选符合条件的个股，返回带评分的列表"""
     stocks = board['stocks'].copy()
+    vol_ratio = pd.to_numeric(stocks['量比'], errors='coerce').fillna(0.0)
     condition = (
         (stocks['流通市值'] >= CONFIG["MIN_MARKET_CAP"] * 1e8) &
         (stocks['流通市值'] <= CONFIG["MAX_MARKET_CAP"] * 1e8) &
@@ -321,7 +322,8 @@ def filter_stocks_in_board(board, stock_df):
         (stocks['涨跌幅'] <= CONFIG["MAX_CHANGE_PCT"]) &
         (stocks['成交额'] >= CONFIG["MIN_VOLUME"] * 1e8) &
         (stocks['换手率'] >= CONFIG["MIN_TURNOVER"]) &
-        (stocks['换手率'] <= CONFIG["MAX_TURNOVER"])
+        (stocks['换手率'] <= CONFIG["MAX_TURNOVER"]) &
+        (vol_ratio >= 0.8)
     )
     filtered = stocks[condition].copy()
     if len(filtered) == 0:
@@ -515,6 +517,7 @@ def main():
                     log("   ✗ 分时形态不佳，建议放弃")
             else:
                 log("   ⚠️ 分时数据获取失败，请人工复核")
+                minute_ok = False
         else:
             minute_ok = True
 
