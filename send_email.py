@@ -4,6 +4,9 @@ import json
 from email.mime.text import MIMEText
 from email.header import Header
 from datetime import datetime
+from env_loader import load_env_file
+
+load_env_file(".env")
 
 def send_email(subject, content):
     """发送邮件，支持多个收件人（用逗号分隔）"""

@@ -14,6 +14,9 @@ import pandas as pd
 import numpy as np
 import akshare as ak
 from datetime import datetime, time as datetime_time
+from env_loader import load_env_file
+
+load_env_file(".env")
 
 # ========== 时区设置 ==========
 os.environ['TZ'] = 'Asia/Shanghai'
@@ -40,6 +43,13 @@ CONFIG = {
     "LOG_DIR": "trade_logs",        # 日志目录
     "ENABLE_MINUTE": True,          # 是否获取分时数据
 }
+
+CONFIG["ENABLE_MINUTE"] = str(os.environ.get("ENABLE_MINUTE", str(CONFIG["ENABLE_MINUTE"]))).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # 全局变量
 all_candidates = []
