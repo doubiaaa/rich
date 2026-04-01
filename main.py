@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.3 (修复成交额获取匹配逻辑)
+版本：v2.4 (沪深重要指数 + 东财日线 sh/sz 代码)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -17,7 +17,8 @@ from datetime import datetime, time as datetime_time
 
 # ========== 时区设置 ==========
 os.environ['TZ'] = 'Asia/Shanghai'
-time.tzset()  # 使 datetime.now() 返回北京时间
+if hasattr(time, "tzset"):
+    time.tzset()  # Unix：使 datetime.now() 对齐 TZ；Windows 无 tzset，依赖本机时区
 
 warnings.filterwarnings("ignore")
 
@@ -84,35 +85,40 @@ def get_market_volume():
     获取沪深两市总成交额（亿元）
     优先使用实时数据，失败则取上一交易日收盘数据
     """
-    # 方法1：实时行情
+    # 方法1：实时行情（必须用「沪深重要指数」，默认「上证系列指数」只有沪市，无法配到深证）
     try:
-        df = safe_request(ak.stock_zh_index_spot_em)
+        df = safe_request(ak.stock_zh_index_spot_em, symbol="沪深重要指数")
         if df is not None and not df.empty:
-            # 调试输出（仅第一次）
             if not hasattr(get_market_volume, "_debug_logged"):
                 log(f"指数数据样例: {df.head(2).to_dict()}")
                 get_market_volume._debug_logged = True
-            # 兼容列名
             name_col = '名称' if '名称' in df.columns else 'name'
-            # 使用模糊匹配（包含“上证”和“深证”）
-            sh_rows = df[df[name_col].str.contains('上证', na=False)]
-            sz_rows = df[df[name_col].str.contains('深证', na=False)]
+            code_col = '代码' if '代码' in df.columns else 'code'
+            vol_col = '成交额' if '成交额' in df.columns else 'amount'
+            # 优先用固定代码：上证指数 000001、深证成指 399001（名称可能变更）
+            sh_rows = df[df[code_col].astype(str).str.replace(r'\.0$', '', regex=True) == '000001']
+            sz_rows = df[df[code_col].astype(str).str.replace(r'\.0$', '', regex=True) == '399001']
+            if sh_rows.empty:
+                sh_rows = df[df[name_col].str.contains('上证指数|上证综指', na=False, regex=True)]
+            if sz_rows.empty:
+                sz_rows = df[
+                    df[name_col].str.contains('深证成指|深证指数|深成指', na=False, regex=True)
+                ]
             if not sh_rows.empty and not sz_rows.empty:
-                vol_col = '成交额' if '成交额' in df.columns else 'amount'
-                # 取第一个匹配的指数
                 vol_sh = float(sh_rows.iloc[0][vol_col]) / 1e8
                 vol_sz = float(sz_rows.iloc[0][vol_col]) / 1e8
                 return vol_sh + vol_sz
     except Exception as e:
         log(f"获取实时成交额失败: {e}")
 
-    # 方法2：历史日线（上一交易日）
+    # 方法2：历史日线（东财接口须 sh000001 / sz399001，列为 amount 非「成交额」）
     try:
-        sh_hist = safe_request(ak.stock_zh_index_daily_em, symbol="上证指数")
-        sz_hist = safe_request(ak.stock_zh_index_daily_em, symbol="深证成指")
+        sh_hist = safe_request(ak.stock_zh_index_daily_em, symbol="sh000001")
+        sz_hist = safe_request(ak.stock_zh_index_daily_em, symbol="sz399001")
         if sh_hist is not None and sz_hist is not None and len(sh_hist) > 0 and len(sz_hist) > 0:
-            vol_sh = sh_hist.iloc[-1]['成交额'] / 1e8
-            vol_sz = sz_hist.iloc[-1]['成交额'] / 1e8
+            amt_col = 'amount' if 'amount' in sh_hist.columns else '成交额'
+            vol_sh = float(sh_hist.iloc[-1][amt_col]) / 1e8
+            vol_sz = float(sz_hist.iloc[-1][amt_col]) / 1e8
             return vol_sh + vol_sz
     except Exception as e:
         log(f"获取历史成交额失败: {e}")
@@ -353,10 +359,13 @@ def main():
     if market_vol == 0:
         log("实时和历史成交额获取均失败，尝试再次获取历史日线...")
         try:
-            sh_hist = ak.stock_zh_index_daily_em(symbol="上证指数")
-            sz_hist = ak.stock_zh_index_daily_em(symbol="深证成指")
+            sh_hist = ak.stock_zh_index_daily_em(symbol="sh000001")
+            sz_hist = ak.stock_zh_index_daily_em(symbol="sz399001")
             if sh_hist is not None and sz_hist is not None and len(sh_hist) > 0 and len(sz_hist) > 0:
-                market_vol = (sh_hist.iloc[-1]['成交额'] + sz_hist.iloc[-1]['成交额']) / 1e8
+                amt_col = 'amount' if 'amount' in sh_hist.columns else '成交额'
+                market_vol = (
+                    float(sh_hist.iloc[-1][amt_col]) + float(sz_hist.iloc[-1][amt_col])
+                ) / 1e8
                 log(f"最终使用上一交易日成交额: {market_vol:.0f}亿")
         except Exception as e:
             log(f"再次获取历史成交额失败: {e}")
