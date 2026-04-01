@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.1 (时区修正 + 成交额降级)
+版本：v2.2 (稳健成交额获取 + 列名兼容 + 完整降级)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -84,26 +84,38 @@ def get_market_volume():
     获取沪深两市总成交额（亿元）
     优先使用实时数据，失败则取上一交易日收盘数据
     """
+    # 方法1：实时行情
     try:
-        # 方法1：实时行情
         df = safe_request(ak.stock_zh_index_spot_em)
-        if df is not None:
-            sh_row = df[df['名称'] == '上证指数']
-            sz_row = df[df['名称'] == '深证成指']
+        if df is not None and not df.empty:
+            # 调试输出（仅第一次）
+            if not hasattr(get_market_volume, "_debug_logged"):
+                log(f"指数数据样例: {df.head(2).to_dict()}")
+                get_market_volume._debug_logged = True
+            # 兼容列名：可能是 '名称' 或 'name'
+            name_col = '名称' if '名称' in df.columns else 'name'
+            # 找到上证和深证指数
+            sh_row = df[df[name_col].str.contains('上证', na=False)]
+            sz_row = df[df[name_col].str.contains('深证', na=False)]
             if not sh_row.empty and not sz_row.empty:
-                vol_sh = float(sh_row.iloc[0]['成交额']) / 1e8
-                vol_sz = float(sz_row.iloc[0]['成交额']) / 1e8
+                vol_col = '成交额' if '成交额' in df.columns else 'amount'
+                vol_sh = float(sh_row.iloc[0][vol_col]) / 1e8
+                vol_sz = float(sz_row.iloc[0][vol_col]) / 1e8
                 return vol_sh + vol_sz
+    except Exception as e:
+        log(f"获取实时成交额失败: {e}")
 
-        # 方法2：历史日线（上一交易日）
-        sh_hist = ak.stock_zh_index_daily_em(symbol="上证指数")
-        sz_hist = ak.stock_zh_index_daily_em(symbol="深证成指")
+    # 方法2：历史日线（上一交易日）
+    try:
+        sh_hist = safe_request(ak.stock_zh_index_daily_em, symbol="上证指数")
+        sz_hist = safe_request(ak.stock_zh_index_daily_em, symbol="深证成指")
         if sh_hist is not None and sz_hist is not None and len(sh_hist) > 0 and len(sz_hist) > 0:
             vol_sh = sh_hist.iloc[-1]['成交额'] / 1e8
             vol_sz = sz_hist.iloc[-1]['成交额'] / 1e8
             return vol_sh + vol_sz
     except Exception as e:
-        log(f"获取市场成交额失败: {e}")
+        log(f"获取历史成交额失败: {e}")
+
     return 0.0
 
 
@@ -336,6 +348,18 @@ def main():
 
     # 2. 获取市场成交额，决定模式
     market_vol = get_market_volume()
+    # 如果成交额为0，尝试使用上一交易日成交额作为降级
+    if market_vol == 0:
+        log("实时成交额获取失败，尝试使用上一交易日成交额")
+        try:
+            sh_hist = ak.stock_zh_index_daily_em(symbol="上证指数")
+            sz_hist = ak.stock_zh_index_daily_em(symbol="深证成指")
+            if not sh_hist.empty and not sz_hist.empty:
+                market_vol = (sh_hist.iloc[-1]['成交额'] + sz_hist.iloc[-1]['成交额']) / 1e8
+                log(f"降级使用上一交易日成交额: {market_vol:.0f}亿")
+        except Exception as e:
+            log(f"降级获取成交额也失败: {e}")
+
     log(f"全市场成交额: {market_vol:.0f}亿")
     dynamic_cfg = get_dynamic_config(market_vol)
     if dynamic_cfg is None:
