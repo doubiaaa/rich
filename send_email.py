@@ -8,7 +8,9 @@ from datetime import datetime
 def send_email(subject, content):
     """发送邮件，支持多个收件人（用逗号分隔）"""
     smtp_server = os.environ.get('SMTP_SERVER')
-    smtp_port = int(os.environ.get('SMTP_PORT', 587))
+    smtp_port_str = os.environ.get('SMTP_PORT', '587')
+    # 修复：如果端口值为空，使用默认587
+    smtp_port = int(smtp_port_str) if smtp_port_str.strip() else 587
     sender = os.environ.get('EMAIL_SENDER')
     password = os.environ.get('EMAIL_PASSWORD')
     receiver_str = os.environ.get('EMAIL_RECEIVER')
