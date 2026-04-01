@@ -11,6 +11,9 @@ if crontab -l 2>/dev/null | grep -F "${ROOT_DIR}/run_daily.sh" >/dev/null; then
   exit 0
 fi
 
-(crontab -l 2>/dev/null; echo "${CRON_CMD}") | crontab -
+# 无 crontab 时 crontab -l 会失败；必须 || true，否则 set -e 会中断，任务加不进去
+(crontab -l 2>/dev/null || true; echo "${CRON_CMD}") | crontab -
 echo "Installed cron:"
 echo "${CRON_CMD}"
+echo "Current crontab:"
+crontab -l
