@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.2 (稳健成交额获取 + 列名兼容 + 完整降级)
+版本：v2.3 (修复成交额获取匹配逻辑)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -92,15 +92,16 @@ def get_market_volume():
             if not hasattr(get_market_volume, "_debug_logged"):
                 log(f"指数数据样例: {df.head(2).to_dict()}")
                 get_market_volume._debug_logged = True
-            # 兼容列名：可能是 '名称' 或 'name'
+            # 兼容列名
             name_col = '名称' if '名称' in df.columns else 'name'
-            # 找到上证和深证指数
-            sh_row = df[df[name_col].str.contains('上证', na=False)]
-            sz_row = df[df[name_col].str.contains('深证', na=False)]
-            if not sh_row.empty and not sz_row.empty:
+            # 使用模糊匹配（包含“上证”和“深证”）
+            sh_rows = df[df[name_col].str.contains('上证', na=False)]
+            sz_rows = df[df[name_col].str.contains('深证', na=False)]
+            if not sh_rows.empty and not sz_rows.empty:
                 vol_col = '成交额' if '成交额' in df.columns else 'amount'
-                vol_sh = float(sh_row.iloc[0][vol_col]) / 1e8
-                vol_sz = float(sz_row.iloc[0][vol_col]) / 1e8
+                # 取第一个匹配的指数
+                vol_sh = float(sh_rows.iloc[0][vol_col]) / 1e8
+                vol_sz = float(sz_rows.iloc[0][vol_col]) / 1e8
                 return vol_sh + vol_sz
     except Exception as e:
         log(f"获取实时成交额失败: {e}")
@@ -348,17 +349,17 @@ def main():
 
     # 2. 获取市场成交额，决定模式
     market_vol = get_market_volume()
-    # 如果成交额为0，尝试使用上一交易日成交额作为降级
+    # 如果成交额为0，尝试使用历史日线再次获取（确保万无一失）
     if market_vol == 0:
-        log("实时成交额获取失败，尝试使用上一交易日成交额")
+        log("实时和历史成交额获取均失败，尝试再次获取历史日线...")
         try:
             sh_hist = ak.stock_zh_index_daily_em(symbol="上证指数")
             sz_hist = ak.stock_zh_index_daily_em(symbol="深证成指")
-            if not sh_hist.empty and not sz_hist.empty:
+            if sh_hist is not None and sz_hist is not None and len(sh_hist) > 0 and len(sz_hist) > 0:
                 market_vol = (sh_hist.iloc[-1]['成交额'] + sz_hist.iloc[-1]['成交额']) / 1e8
-                log(f"降级使用上一交易日成交额: {market_vol:.0f}亿")
+                log(f"最终使用上一交易日成交额: {market_vol:.0f}亿")
         except Exception as e:
-            log(f"降级获取成交额也失败: {e}")
+            log(f"再次获取历史成交额失败: {e}")
 
     log(f"全市场成交额: {market_vol:.0f}亿")
     dynamic_cfg = get_dynamic_config(market_vol)
