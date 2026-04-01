@@ -209,10 +209,11 @@ def get_board_heat(stock_df):
     for concept in concepts:
         try:
             cons = safe_request(ak.stock_board_concept_cons_em, symbol=concept)
-            if cons is None:
+            if cons is None or cons.empty or '代码' not in cons.columns:
                 continue
-            # 合并实时行情
-            merged = pd.merge(cons, stock_df, left_on='代码', right_on='代码')
+            # 只取成份代码再并行情，避免与 stock_df 同名列产生 涨跌幅_x / 涨跌幅_y
+            codes = cons[['代码']].drop_duplicates()
+            merged = pd.merge(codes, stock_df, on='代码', how='inner')
             if len(merged) == 0:
                 continue
             # 涨停家数（涨幅>=9.8%）
