@@ -321,6 +321,9 @@ def get_minute_line(code):
     注：akshare 的 tick 数据有时不稳定，失败时返回 None
     """
     try:
+        if not hasattr(ak, "stock_zh_a_tick_tx"):
+            # 兼容不同 akshare 版本：缺少该接口时直接跳过分时判断
+            return None
         trade_date = datetime.now().strftime('%Y%m%d')
         df = safe_request(ak.stock_zh_a_tick_tx, code=code, trade_date=trade_date)
         if df is None or len(df) == 0:
@@ -386,6 +389,7 @@ def main():
         with open("result.json", "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         return
+    mode = dynamic_cfg["mode"]
 
     # 3. 更新全局配置
     for k, v in dynamic_cfg.items():
@@ -448,9 +452,9 @@ def main():
     log("1. 优先选择得分最高的前2只。")
     log("2. 人工复核分时图：尾盘15分钟白线在黄线上方、无跳水。")
     log("3. 符合条件则在14:55以现价买入，仓位按模式配置：")
-    if CONFIG["mode"] == "large":
+    if mode == "large":
         log("   - 大市值模式：单票3成仓，次日冲高3%-5%卖出，-2%止损。")
-    elif CONFIG["mode"] == "balanced":
+    elif mode == "balanced":
         log("   - 均衡模式：单票2-3成仓，次日冲高3%-5%卖出，-2%止损。")
     else:
         log("   - 小市值模式：单票1-2成仓，次日冲高5%卖出，-3%止损。")
@@ -460,7 +464,7 @@ def main():
     result = {
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "market_volume": market_vol,
-        "mode": CONFIG["mode"],
+        "mode": mode,
         "has_candidates": True,
         "candidates": all_candidates,
         "top_recommend": all_candidates[0] if all_candidates else None
