@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.0 (环境自适应版)
+版本：v2.1 (时区修正 + 成交额降级)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
 
-import akshare as ak
-import pandas as pd
-import numpy as np
-from datetime import datetime, time as datetime_time
-import time
 import os
+import time
 import json
 import warnings
+import pandas as pd
+import numpy as np
+import akshare as ak
+from datetime import datetime, time as datetime_time
+
+# ========== 时区设置 ==========
+os.environ['TZ'] = 'Asia/Shanghai'
+time.tzset()  # 使 datetime.now() 返回北京时间
 
 warnings.filterwarnings("ignore")
 
@@ -33,7 +37,7 @@ CONFIG = {
     "EXCLUDE_BOARDS": ['688', '8'], # 排除科创板、北交所
     "MAX_CONCEPTS": 50,             # 最多分析的概念板块数量
     "LOG_DIR": "trade_logs",        # 日志目录
-    "ENABLE_MINUTE": True,          # 是否获取分时数据（建议开启）
+    "ENABLE_MINUTE": True,          # 是否获取分时数据
 }
 
 # 全局变量
@@ -76,26 +80,28 @@ def safe_request(func, *args, **kwargs):
 
 
 def get_market_volume():
-    """获取沪深两市总成交额（亿元）"""
+    """
+    获取沪深两市总成交额（亿元）
+    优先使用实时数据，失败则取上一交易日收盘数据
+    """
     try:
-        # 获取上证指数实时行情
-        sh_df = ak.stock_zh_index_spot_em()
-        sz_df = ak.stock_zh_index_spot_em()
-        # 提取上证指数和深证成指的成交额
-        sh_row = sh_df[sh_df['名称'] == '上证指数']
-        sz_row = sz_df[sz_df['名称'] == '深证成指']
-        if not sh_row.empty and not sz_row.empty:
-            vol_sh = float(sh_row.iloc[0]['成交额']) / 1e8
-            vol_sz = float(sz_row.iloc[0]['成交额']) / 1e8
-            return vol_sh + vol_sz
-        else:
-            # 备用方法：使用历史数据获取最近一个交易日
-            sh_hist = ak.stock_zh_index_daily_em(symbol="上证指数")
-            sz_hist = ak.stock_zh_index_daily_em(symbol="深证成指")
-            if not sh_hist.empty and not sz_hist.empty:
-                vol_sh = sh_hist.iloc[-1]['成交额'] / 1e8
-                vol_sz = sz_hist.iloc[-1]['成交额'] / 1e8
+        # 方法1：实时行情
+        df = safe_request(ak.stock_zh_index_spot_em)
+        if df is not None:
+            sh_row = df[df['名称'] == '上证指数']
+            sz_row = df[df['名称'] == '深证成指']
+            if not sh_row.empty and not sz_row.empty:
+                vol_sh = float(sh_row.iloc[0]['成交额']) / 1e8
+                vol_sz = float(sz_row.iloc[0]['成交额']) / 1e8
                 return vol_sh + vol_sz
+
+        # 方法2：历史日线（上一交易日）
+        sh_hist = ak.stock_zh_index_daily_em(symbol="上证指数")
+        sz_hist = ak.stock_zh_index_daily_em(symbol="深证成指")
+        if sh_hist is not None and sz_hist is not None and len(sh_hist) > 0 and len(sz_hist) > 0:
+            vol_sh = sh_hist.iloc[-1]['成交额'] / 1e8
+            vol_sz = sz_hist.iloc[-1]['成交额'] / 1e8
+            return vol_sh + vol_sz
     except Exception as e:
         log(f"获取市场成交额失败: {e}")
     return 0.0
@@ -104,7 +110,7 @@ def get_market_volume():
 def get_dynamic_config(market_vol):
     """
     根据市场总成交额返回当前应使用的参数配置
-    返回：config_dict
+    返回：config_dict 或 None（空仓）
     """
     if market_vol >= 20000:
         log(f"当前成交额 {market_vol:.0f}亿 >= 2万亿，使用【大市值模式】")
