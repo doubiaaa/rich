@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.7 (分时失败不通过 + 量比硬过滤 + 大市值上限1000亿)
+版本：v2.8 (中军协同 + 均线多头可选 + 动态止盈止损 + 大盘20日线过滤)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -13,7 +13,7 @@ import warnings
 import pandas as pd
 import numpy as np
 import akshare as ak
-from datetime import datetime, time as datetime_time
+from datetime import datetime, timedelta, time as datetime_time
 from collections import defaultdict
 from env_loader import load_env_file
 
@@ -43,6 +43,7 @@ CONFIG = {
     "MAX_CONCEPTS": 50,             # 最多分析的概念板块数量
     "LOG_DIR": "trade_logs",        # 日志目录
     "ENABLE_MINUTE": True,          # 是否获取分时数据
+    "ENABLE_MA_FILTER": True,       # 是否做日线 MA5/10/20 多头过滤（候选票上会多请求日线）
 }
 
 CONFIG["ENABLE_MINUTE"] = str(os.environ.get("ENABLE_MINUTE", str(CONFIG["ENABLE_MINUTE"]))).lower() in (
@@ -51,9 +52,18 @@ CONFIG["ENABLE_MINUTE"] = str(os.environ.get("ENABLE_MINUTE", str(CONFIG["ENABLE
     "yes",
     "on",
 )
+CONFIG["ENABLE_MA_FILTER"] = str(os.environ.get("ENABLE_MA_FILTER", str(CONFIG["ENABLE_MA_FILTER"]))).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # 全局变量
 all_candidates = []
+
+# 个股日线 MA 缓存（代码 -> 是否多头排列）
+_ma_cache = {}
 
 
 def is_trading_time():
@@ -135,6 +145,62 @@ def get_market_volume():
         log(f"获取历史成交额失败: {e}")
 
     return 0.0
+
+
+def get_market_trend():
+    """上证指数收盘是否在 20 日均线上方；数据不足或失败时默认 True，不挡交易。"""
+    try:
+        df = safe_request(ak.stock_zh_index_daily_em, symbol="sh000001")
+        if df is None or len(df) < 20:
+            return True
+        close = pd.to_numeric(df["close"], errors="coerce")
+        ma20 = close.rolling(20).mean()
+        last_close = close.iloc[-1]
+        last_ma = ma20.iloc[-1]
+        if pd.isna(last_close) or pd.isna(last_ma):
+            return True
+        return last_close > last_ma
+    except Exception:
+        return True
+
+
+def get_ma_status(code):
+    """MA5>MA10>MA20 且 收盘>MA5（前复权日线）。"""
+    sym = str(code).strip().zfill(6)
+    if sym in _ma_cache:
+        return _ma_cache[sym]
+    if not hasattr(ak, "stock_zh_a_hist"):
+        _ma_cache[sym] = False
+        return False
+    try:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=150)).strftime("%Y%m%d")
+        df = safe_request(
+            ak.stock_zh_a_hist,
+            symbol=sym,
+            period="daily",
+            start_date=start,
+            end_date=end,
+            adjust="qfq",
+        )
+        if df is None or len(df) < 20:
+            _ma_cache[sym] = False
+            return False
+        c = pd.to_numeric(df["收盘"], errors="coerce")
+        ma5 = c.rolling(5).mean()
+        ma10 = c.rolling(10).mean()
+        ma20 = c.rolling(20).mean()
+        l5, l10, l20 = ma5.iloc[-1], ma10.iloc[-1], ma20.iloc[-1]
+        lc = c.iloc[-1]
+        if pd.isna(l5) or pd.isna(l10) or pd.isna(l20) or pd.isna(lc):
+            _ma_cache[sym] = False
+            return False
+        ok = (l5 > l10 > l20) and (lc > l5)
+        _ma_cache[sym] = bool(ok)
+        return bool(ok)
+    except Exception:
+        _ma_cache[sym] = False
+        return False
 
 
 def get_dynamic_config(market_vol):
@@ -237,7 +303,7 @@ def get_board_heat(stock_df):
                 if avg_pct >= CONFIG["MIN_BOARD_PCT"]:
                     # 额外条件：板块内成交额最大的个股涨幅>2%（避免小票自嗨）
                     largest_vol_stock = merged.sort_values('成交额', ascending=False).iloc[0]
-                    if largest_vol_stock['涨跌幅'] >= 2:
+                    if largest_vol_stock['涨跌幅'] >= avg_pct * 0.8:
                         hot_boards.append({
                             'name': concept,
                             'limit_count': cnt,
@@ -329,6 +395,12 @@ def filter_stocks_in_board(board, stock_df):
     if len(filtered) == 0:
         return []
 
+    if CONFIG.get("ENABLE_MA_FILTER", True):
+        keep = filtered['代码'].map(lambda c: get_ma_status(c))
+        filtered = filtered[keep].copy()
+        if len(filtered) == 0:
+            return []
+
     # 按成交额排序，取前 TOP_N
     filtered = filtered.sort_values('成交额', ascending=False).head(CONFIG["TOP_N"])
     results = []
@@ -408,6 +480,22 @@ def main():
             log(f"再次获取历史成交额失败: {e}")
 
     log(f"全市场成交额: {market_vol:.0f}亿")
+    if not get_market_trend():
+        log("上证指数在20日均线下方，大盘趋势走弱，今日不交易")
+        result = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "market_volume": market_vol,
+            "mode": "no_trade",
+            "has_candidates": False,
+            "unique_recommendation": None,
+            "all_candidates": [],
+            "candidates": [],
+            "reason": "market_below_ma20",
+        }
+        with open("result.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+        return
+
     dynamic_cfg = get_dynamic_config(market_vol)
     if dynamic_cfg is None:
         log("根据成交量判断，今日不适合交易，请空仓。")
@@ -522,16 +610,21 @@ def main():
             minute_ok = True
 
         if minute_ok:
+            limit_cnt = int(unique_recommendation['板块涨停家数'])
+            if limit_cnt >= 10:
+                take_profit = "5%-7%"
+                stop_loss = "-4%"
+            elif limit_cnt >= 7:
+                take_profit = "4%-6%"
+                stop_loss = "-3.5%"
+            else:
+                take_profit = "3%-5%"
+                stop_loss = "-3%"
             log("\n【最终交易指令】")
             log(f"   标的：{name}({code})")
             log("   仓位：全仓（小资金集中模式）")
             log("   买入：14:55 以现价买入，确认分时图白线在黄线上方")
-            if mode == "large":
-                log("   次日：冲高3%-5%卖出，-3%硬止损")
-            elif mode == "balanced":
-                log("   次日：冲高3%-5%卖出，-3%硬止损")
-            else:
-                log("   次日：冲高5%卖出，-3%硬止损")
+            log(f"   次日：冲高{take_profit}卖出，{stop_loss}硬止损")
             log("   ⚠️ 全仓操作，务必严格执行止损！")
         else:
             log("\n【最终结论】分时形态不符合要求，今日不交易")
