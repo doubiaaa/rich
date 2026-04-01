@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.4 (沪深重要指数 + 东财日线 sh/sz 代码)
+版本：v2.5 (1分钟K线分时 + 量比评分 + 大市值无上限)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -148,7 +148,7 @@ def get_dynamic_config(market_vol):
             "MIN_BOARD_STOCKS": 8,
             "MIN_BOARD_PCT": 3.0,
             "MIN_MARKET_CAP": 100,       # 亿
-            "MAX_MARKET_CAP": 500,
+            "MAX_MARKET_CAP": float('inf'),
             "MAX_CHANGE_PCT": 8,
             "MIN_TURNOVER": 2,
             "MAX_TURNOVER": 15,
@@ -179,7 +179,7 @@ def get_dynamic_config(market_vol):
             "MIN_BOARD_PCT": 2.5,
             "MIN_MARKET_CAP": 20,
             "MAX_MARKET_CAP": 80,
-            "MAX_CHANGE_PCT": 8,
+            "MAX_CHANGE_PCT": 6,
             "MIN_TURNOVER": 5,
             "MAX_TURNOVER": 25,
             "MIN_VOLUME": 3,
@@ -192,19 +192,21 @@ def get_dynamic_config(market_vol):
 
 
 def get_all_stocks():
-    """获取沪深A股实时行情，过滤科创板/北交所"""
+    """获取沪深A股实时行情，过滤科创板/北交所，含量比"""
     df = safe_request(ak.stock_zh_a_spot_em)
     if df is None:
         return None
     # 过滤科创板、北交所
     df = df[~df['代码'].str.startswith(tuple(CONFIG["EXCLUDE_BOARDS"]))]
-    # 只保留需要的列
-    cols = ['代码', '名称', '最新价', '涨跌幅', '成交额', '换手率', '流通市值']
+    cols = ['代码', '名称', '最新价', '涨跌幅', '成交额', '换手率', '流通市值', '量比']
+    for col in cols:
+        if col not in df.columns:
+            df[col] = 1.0 if col == '量比' else np.nan
     df = df[cols]
-    # 转换数值
-    for col in ['涨跌幅', '成交额', '换手率', '流通市值']:
+    for col in ['涨跌幅', '成交额', '换手率', '流通市值', '量比']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna()
+    df['量比'] = df['量比'].fillna(1.0)
+    df = df.dropna(subset=['涨跌幅', '成交额', '换手率', '流通市值'])
     return df
 
 
@@ -250,7 +252,7 @@ def get_board_heat(stock_df):
 
 
 def calculate_score(stock, board, rank_in_board):
-    """综合评分（0-10）"""
+    """综合评分（约 0-12，含量比）"""
     score = 0.0
     # 1. 板块涨停家数 (0-2)
     limit_cnt = board['limit_count']
@@ -292,6 +294,15 @@ def calculate_score(stock, board, rank_in_board):
     elif 5 <= turnover < 10 or 20 < turnover <= 25:
         score += 1
 
+    # 6. 量比 (0-2)
+    vol_ratio = float(stock.get('量比', 1.0) or 1.0)
+    if vol_ratio >= 2.0:
+        score += 2
+    elif vol_ratio >= 1.5:
+        score += 1.5
+    elif vol_ratio >= 1.2:
+        score += 1
+
     return score
 
 
@@ -327,35 +338,40 @@ def filter_stocks_in_board(board, stock_df):
 
 def get_minute_line(code):
     """
-    获取分时数据（简化版，返回尾盘10分钟在均线上方占比、最后5分钟涨跌幅）
-    注：akshare 的 tick 数据有时不稳定，失败时返回 None
+    用东财 1 分钟走势（akshare 1 分钟周期）估算尾盘相对均价位置与近两根涨跌。
+    失败返回 None。
     """
     try:
-        if not hasattr(ak, "stock_zh_a_tick_tx"):
-            # 兼容不同 akshare 版本：缺少该接口时直接跳过分时判断
+        if not hasattr(ak, "stock_zh_a_hist_min_em"):
             return None
-        trade_date = datetime.now().strftime('%Y%m%d')
-        df = safe_request(ak.stock_zh_a_tick_tx, code=code, trade_date=trade_date)
-        if df is None or len(df) == 0:
+        sym = str(code).strip().zfill(6)
+        df = safe_request(ak.stock_zh_a_hist_min_em, symbol=sym, period="1", adjust="")
+        if df is None or df.empty:
             return None
-        # 计算累计均价
-        df['amount'] = df['成交额']
-        df['volume'] = df['成交量']
+        df['amount'] = pd.to_numeric(df['成交额'], errors='coerce')
+        df['volume'] = pd.to_numeric(df['成交量'], errors='coerce')
+        df['收盘'] = pd.to_numeric(df['收盘'], errors='coerce')
+        df = df.dropna(subset=['amount', 'volume', '收盘'])
+        if len(df) == 0:
+            return None
         df['cum_amount'] = df['amount'].cumsum()
         df['cum_volume'] = df['volume'].cumsum()
         df['avg_price'] = df['cum_amount'] / df['cum_volume']
-        # 最后10个tick
         last_10 = df.tail(10)
-        above_avg = (last_10['价格'] > last_10['avg_price']).mean() * 100
-        # 最后5个tick涨跌幅
-        last_5 = df.tail(5)
-        if len(last_5) >= 2:
-            drop = (last_5['价格'].iloc[-1] - last_5['价格'].iloc[0]) / last_5['价格'].iloc[0] * 100
+        if len(last_10) == 0:
+            return None
+        above_avg = (last_10['收盘'] > last_10['avg_price']).mean() * 100
+        if len(last_10) >= 2:
+            last5_drop = (
+                (last_10['收盘'].iloc[-1] - last_10['收盘'].iloc[-2])
+                / last_10['收盘'].iloc[-2]
+                * 100
+            )
         else:
-            drop = 0
-        return {'above_ratio': above_avg, 'last5_drop': drop}
+            last5_drop = 0.0
+        return {'above_ratio': above_avg, 'last5_drop': last5_drop}
     except Exception as e:
-        log(f"获取分时数据失败 {code}: {e}")
+        log(f"获取1分钟走势失败 {code}: {e}")
         return None
 
 
@@ -449,7 +465,8 @@ def main():
         for c in all_candidates[:3]:
             minute = get_minute_line(c['代码'])
             if minute:
-                log(f"  {c['名称']} 尾盘10分钟在均线上方占比:{minute['above_ratio']:.1f}% 最后5分钟跌幅:{minute['last5_drop']:.2f}%")
+                log(f"  {c['名称']} 尾盘10根1分钟在累计均线上方占比:{minute['above_ratio']:.1f}% "
+                    f"近2根1分钟涨跌:{minute['last5_drop']:.2f}%")
                 if minute['above_ratio'] >= 80 and minute['last5_drop'] > -1:
                     log(f"    ✓ 分时形态较好，可重点关注")
                 else:
@@ -457,17 +474,34 @@ def main():
             else:
                 log(f"  {c['名称']} 分时数据获取失败，请人工查看")
 
-    # 10. 最终建议
+    # 10. 最终建议（唯一推荐 + 可选分时）
     log("\n【操作建议】")
-    log("1. 优先选择得分最高的前2只。")
-    log("2. 人工复核分时图：尾盘15分钟白线在黄线上方、无跳水。")
-    log("3. 符合条件则在14:55以现价买入，仓位按模式配置：")
-    if mode == "large":
-        log("   - 大市值模式：单票3成仓，次日冲高3%-5%卖出，-2%止损。")
-    elif mode == "balanced":
-        log("   - 均衡模式：单票2-3成仓，次日冲高3%-5%卖出，-2%止损。")
+    if all_candidates:
+        best = all_candidates[0]
+        log(f"⭐ 唯一推荐：{best['名称']}({best['代码']}) 板块:{best['板块']} 得分:{best['得分']:.1f}")
+        log(f"   今日涨幅:{best['涨跌幅']:.2f}% 成交额:{best['成交额']/1e8:.1f}亿 换手:{best['换手率']:.1f}%")
+        if CONFIG["ENABLE_MINUTE"]:
+            minute = get_minute_line(best['代码'])
+            if minute:
+                log(f"   分时(1分钟): 尾盘10根在累计均线上方占比:{minute['above_ratio']:.1f}% "
+                    f"近2根1分钟涨跌:{minute['last5_drop']:.2f}%")
+                if minute['above_ratio'] >= 80 and minute['last5_drop'] > -1:
+                    log("   ✓ 分时形态较好，可重点关注")
+                else:
+                    log("   ✗ 分时形态一般，建议谨慎或放弃")
+        log("\n买入条件：")
+        log("   - 尾盘14:55分时图白线在黄线上方且无跳水，以现价买入")
+        if mode == "large":
+            log("   - 仓位：3成（大市值模式）")
+            log("   - 次日计划：冲高3%-5%卖出，-2%止损")
+        elif mode == "balanced":
+            log("   - 仓位：2-3成（均衡模式）")
+            log("   - 次日计划：冲高3%-5%卖出，-2%止损")
+        else:
+            log("   - 仓位：1-2成（小市值模式）")
+            log("   - 次日计划：冲高5%卖出，-3%止损")
     else:
-        log("   - 小市值模式：单票1-2成仓，次日冲高5%卖出，-3%止损。")
+        log("今日无符合条件的候选票，建议空仓。")
     log("========== 选股完成 ==========\n")
 
     # 保存结果
