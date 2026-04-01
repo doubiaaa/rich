@@ -76,21 +76,38 @@ if __name__ == "__main__":
     date = data.get('date', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     market_volume = data.get('market_volume')
     mode = data.get('mode')
-    has_candidates = data.get('has_candidates', False)
+    unique_recommendation = data.get('unique_recommendation')
+    ref_top = data.get('all_candidates', [])
     candidates = data.get('candidates', [])
     top_recommend = data.get('top_recommend')
+
+    has_candidates = data.get('has_candidates', False)
+    if unique_recommendation is not None:
+        has_candidates = True
+    elif candidates:
+        has_candidates = True
 
     # 构建邮件内容
     content_lines = []
     content_lines.append(f"选股时间: {date}")
-    if market_volume:
+    if market_volume is not None:
         content_lines.append(f"市场成交额: {market_volume:.0f}亿")
     if mode:
         content_lines.append(f"当前模式: {mode}")
         content_lines.append(get_trade_suggestion(mode))
     content_lines.append("")
 
-    if has_candidates and candidates:
+    if unique_recommendation is not None:
+        content_lines.append("【唯一推荐】")
+        content_lines.append(format_candidate(unique_recommendation))
+        content_lines.append("")
+        if ref_top:
+            content_lines.append("【参考（前5）】")
+            for idx, c in enumerate(ref_top, 1):
+                content_lines.append(format_candidate(c, idx))
+            content_lines.append("")
+        content_lines.append("操作提醒：全仓指令以脚本日志为准；人工复核分时后下单。")
+    elif has_candidates and candidates:
         content_lines.append("【候选票列表】（按得分排序）")
         for idx, c in enumerate(candidates, 1):
             content_lines.append(format_candidate(c, idx))

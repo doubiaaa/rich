@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.5 (1分钟K线分时 + 量比评分 + 大市值无上限)
+版本：v2.6 (最强板块唯一推荐 + 分时 gate + 全仓指令输出)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 import akshare as ak
 from datetime import datetime, time as datetime_time
+from collections import defaultdict
 from env_loader import load_env_file
 
 load_env_file(".env")
@@ -252,7 +253,7 @@ def get_board_heat(stock_df):
 
 
 def calculate_score(stock, board, rank_in_board):
-    """综合评分（约 0-12，含量比）"""
+    """综合评分（0-12）"""
     score = 0.0
     # 1. 板块涨停家数 (0-2)
     limit_cnt = board['limit_count']
@@ -295,7 +296,11 @@ def calculate_score(stock, board, rank_in_board):
         score += 1
 
     # 6. 量比 (0-2)
-    vol_ratio = float(stock.get('量比', 1.0) or 1.0)
+    vol_ratio = stock.get('量比', 1.0)
+    try:
+        vol_ratio = float(vol_ratio if vol_ratio is not None else 1.0)
+    except (TypeError, ValueError):
+        vol_ratio = 1.0
     if vol_ratio >= 2.0:
         score += 2
     elif vol_ratio >= 1.5:
@@ -410,10 +415,12 @@ def main():
             "market_volume": market_vol,
             "mode": "no_trade",
             "has_candidates": False,
-            "candidates": []
+            "unique_recommendation": None,
+            "all_candidates": [],
+            "candidates": [],
         }
         with open("result.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+            json.dump(result, f, ensure_ascii=False, indent=2, default=str)
         return
     mode = dynamic_cfg["mode"]
 
@@ -452,69 +459,97 @@ def main():
     # 7. 综合评分排序
     all_candidates.sort(key=lambda x: (x['得分'], x['成交额']), reverse=True)
 
-    # 8. 输出候选列表
-    log("\n=== 今日尾盘候选票（按推荐优先级排序） ===")
-    for i, c in enumerate(all_candidates):
+    log("\n=== 今日尾盘候选票（按推荐优先级排序，节选） ===")
+    for i, c in enumerate(all_candidates[:15]):
         log(f"{i+1}. {c['名称']}({c['代码']}) 板块:{c['板块']} "
             f"涨幅:{c['涨跌幅']:.2f}% 成交额:{c['成交额']/1e8:.1f}亿 "
             f"换手:{c['换手率']:.1f}% 得分:{c['得分']:.1f}")
 
-    # 9. 获取前3只的分时形态（可选）
-    if CONFIG["ENABLE_MINUTE"]:
-        log("\n正在获取分时数据（仅前3名），请稍候...")
-        for c in all_candidates[:3]:
-            minute = get_minute_line(c['代码'])
-            if minute:
-                log(f"  {c['名称']} 尾盘10根1分钟在累计均线上方占比:{minute['above_ratio']:.1f}% "
-                    f"近2根1分钟涨跌:{minute['last5_drop']:.2f}%")
-                if minute['above_ratio'] >= 80 and minute['last5_drop'] > -1:
-                    log(f"    ✓ 分时形态较好，可重点关注")
-                else:
-                    log(f"    ✗ 分时形态一般，建议放弃")
-            else:
-                log(f"  {c['名称']} 分时数据获取失败，请人工查看")
+    # 8. 唯一推荐：最强板块（涨停家数*2+平均涨幅）+ 该板块内得分第一
+    board_stats = defaultdict(lambda: {'count': 0, 'avg_pct': 0.0, 'stocks': []})
+    for c in all_candidates:
+        bname = c['板块']
+        board_stats[bname]['count'] = c['板块涨停家数']
+        board_stats[bname]['avg_pct'] = c['板块平均涨幅']
+        board_stats[bname]['stocks'].append(c)
 
-    # 10. 最终建议（唯一推荐 + 可选分时）
-    log("\n【操作建议】")
-    if all_candidates:
-        best = all_candidates[0]
-        log(f"⭐ 唯一推荐：{best['名称']}({best['代码']}) 板块:{best['板块']} 得分:{best['得分']:.1f}")
-        log(f"   今日涨幅:{best['涨跌幅']:.2f}% 成交额:{best['成交额']/1e8:.1f}亿 换手:{best['换手率']:.1f}%")
+    best_board_name = None
+    best_board_score = -1.0
+    for bname, stat in board_stats.items():
+        brd_score = stat['count'] * 2 + stat['avg_pct']
+        if brd_score > best_board_score:
+            best_board_score = brd_score
+            best_board_name = bname
+
+    unique_recommendation = None
+    if best_board_name:
+        stocks_in_board = board_stats[best_board_name]['stocks']
+        stocks_in_board.sort(key=lambda x: (x['得分'], x['成交额']), reverse=True)
+        unique_recommendation = stocks_in_board[0]
+        bc = board_stats[best_board_name]['count']
+        ba = board_stats[best_board_name]['avg_pct']
+        log(f"\n【唯一推荐板块】{best_board_name} (涨停{bc}家, 平均涨幅{ba:.2f}%)")
+
+    # 9. 分时确认 + 最终交易指令
+    if unique_recommendation:
+        code = unique_recommendation['代码']
+        name = unique_recommendation['名称']
+        log(f"\n【唯一推荐个股】{name}({code})")
+        log(f"   板块:{unique_recommendation['板块']} 得分:{unique_recommendation['得分']:.1f}")
+        log(f"   涨幅:{unique_recommendation['涨跌幅']:.2f}% "
+            f"成交额:{unique_recommendation['成交额']/1e8:.1f}亿 "
+            f"换手:{unique_recommendation['换手率']:.1f}%")
+
+        minute_ok = False
         if CONFIG["ENABLE_MINUTE"]:
-            minute = get_minute_line(best['代码'])
+            minute = get_minute_line(code)
             if minute:
-                log(f"   分时(1分钟): 尾盘10根在累计均线上方占比:{minute['above_ratio']:.1f}% "
-                    f"近2根1分钟涨跌:{minute['last5_drop']:.2f}%")
-                if minute['above_ratio'] >= 80 and minute['last5_drop'] > -1:
-                    log("   ✓ 分时形态较好，可重点关注")
+                above = minute['above_ratio']
+                last5 = minute['last5_drop']
+                log(f"   分时(1分钟): 尾盘10根在累计均线上方占比:{above:.1f}% "
+                    f"近2根1分钟涨跌:{last5:.2f}%")
+                if above >= 80 and last5 > -1:
+                    minute_ok = True
+                    log("   ✓ 分时形态良好，符合买入条件")
                 else:
-                    log("   ✗ 分时形态一般，建议谨慎或放弃")
-        log("\n买入条件：")
-        log("   - 尾盘14:55分时图白线在黄线上方且无跳水，以现价买入")
-        if mode == "large":
-            log("   - 仓位：3成（大市值模式）")
-            log("   - 次日计划：冲高3%-5%卖出，-2%止损")
-        elif mode == "balanced":
-            log("   - 仓位：2-3成（均衡模式）")
-            log("   - 次日计划：冲高3%-5%卖出，-2%止损")
+                    log("   ✗ 分时形态不佳，建议放弃")
+            else:
+                log("   ⚠️ 分时数据获取失败，请人工复核")
         else:
-            log("   - 仓位：1-2成（小市值模式）")
-            log("   - 次日计划：冲高5%卖出，-3%止损")
+            minute_ok = True
+
+        if minute_ok:
+            log("\n【最终交易指令】")
+            log(f"   标的：{name}({code})")
+            log("   仓位：全仓（小资金集中模式）")
+            log("   买入：14:55 以现价买入，确认分时图白线在黄线上方")
+            if mode == "large":
+                log("   次日：冲高3%-5%卖出，-3%硬止损")
+            elif mode == "balanced":
+                log("   次日：冲高3%-5%卖出，-3%硬止损")
+            else:
+                log("   次日：冲高5%卖出，-3%硬止损")
+            log("   ⚠️ 全仓操作，务必严格执行止损！")
+        else:
+            log("\n【最终结论】分时形态不符合要求，今日不交易")
+            unique_recommendation = None
     else:
-        log("今日无符合条件的候选票，建议空仓。")
+        log("\n【最终结论】今日无符合条件的唯一推荐票，建议空仓")
+
     log("========== 选股完成 ==========\n")
 
-    # 保存结果
     result = {
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "market_volume": market_vol,
         "mode": mode,
-        "has_candidates": True,
+        "has_candidates": unique_recommendation is not None,
+        "unique_recommendation": unique_recommendation,
+        "all_candidates": all_candidates[:5],
         "candidates": all_candidates,
-        "top_recommend": all_candidates[0] if all_candidates else None
+        "top_recommend": unique_recommendation,
     }
     with open("result.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     log("结果已保存至 result.json")
 
 
