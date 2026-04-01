@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 由 crontab 在交易日约 14:45–14:50 触发为宜；详见 install_cron.sh 注释。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

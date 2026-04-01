@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 建议在每交易日 14:45–14:50 之间跑一次：数据拉取约 2–3 分钟，约 14:50 出结果便于 14:55 前下单。
+# 默认 14:45；若希望更接近 14:50 出结果，可把下面 CRON_CMD 里的 45 改成 50。
+# 请确保系统时区为 Asia/Shanghai，并与 NTP 同步（如 timedatectl / chrony）。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
