@@ -31,10 +31,16 @@ def send_email(subject, content):
     msg['To'] = ', '.join(receivers)  # 显示在邮件头部
     
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender, password)
-            server.sendmail(sender, receivers, msg.as_string())
+        # 465：QQ 等邮箱常用 SSL；587：STARTTLS
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+                server.login(sender, password)
+                server.sendmail(sender, receivers, msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls()
+                server.login(sender, password)
+                server.sendmail(sender, receivers, msg.as_string())
         print(f"邮件发送成功，收件人: {receivers}")
         return True
     except Exception as e:
