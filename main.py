@@ -495,28 +495,37 @@ def main():
         log("⚠️ 当前非交易时段，数据可能不是实时行情，请确认运行时间")
 
     # 2. 获取市场成交额，决定模式
-    market_vol = get_market_volume()
+    market_vol_raw = get_market_volume()
+    market_vol_used = market_vol_raw
+    market_vol_fallback = False
     # 如果成交额为0，尝试使用历史日线再次获取（确保万无一失）
-    if market_vol == 0:
+    if market_vol_used == 0:
         log("实时和历史成交额获取均失败，尝试再次获取历史日线...")
         try:
             sh_hist = ak.stock_zh_index_daily_em(symbol="sh000001")
             sz_hist = ak.stock_zh_index_daily_em(symbol="sz399001")
             if sh_hist is not None and sz_hist is not None and len(sh_hist) > 0 and len(sz_hist) > 0:
                 amt_col = 'amount' if 'amount' in sh_hist.columns else '成交额'
-                market_vol = (
+                market_vol_used = (
                     float(sh_hist.iloc[-1][amt_col]) + float(sz_hist.iloc[-1][amt_col])
                 ) / 1e8
-                log(f"最终使用上一交易日成交额: {market_vol:.0f}亿")
+                log(f"最终使用上一交易日成交额: {market_vol_used:.0f}亿")
         except Exception as e:
             log(f"再次获取历史成交额失败: {e}")
 
-    log(f"全市场成交额: {market_vol:.0f}亿")
+    # 网络抖动下，如果仍拿不到成交额（market_vol_used==0），不要直接空仓
+    # 而是使用默认「均衡模式」参数继续跑（避免因为网络问题导致永远无候选）。
+    if market_vol_used == 0:
+        market_vol_fallback = True
+        market_vol_used = 12000  # 让 get_dynamic_config 进入 balanced
+        log("⚠️ 成交额获取失败（market_vol=0），改用默认【均衡模式】继续跑")
+
+    log(f"全市场成交额(用于参数): {market_vol_used:.0f}亿；原始值: {market_vol_raw:.0f}亿")
     if not get_market_trend():
         log("上证指数在20日均线下方，大盘趋势走弱，今日不交易")
         result = {
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "market_volume": market_vol,
+            "market_volume": market_vol_raw,
             "mode": "no_trade",
             "has_candidates": False,
             "unique_recommendation": None,
@@ -528,18 +537,20 @@ def main():
             json.dump(result, f, ensure_ascii=False, indent=2, default=str)
         return
 
-    dynamic_cfg = get_dynamic_config(market_vol)
+    dynamic_cfg = get_dynamic_config(market_vol_used)
     if dynamic_cfg is None:
         log("根据成交量判断，今日不适合交易，请空仓。")
         # 仍然输出一个空结果
         result = {
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "market_volume": market_vol,
+            "market_volume": market_vol_raw,
             "mode": "no_trade",
             "has_candidates": False,
             "unique_recommendation": None,
             "all_candidates": [],
             "candidates": [],
+            "reason": "dynamic_cfg_none",
+            "market_vol_fallback": market_vol_fallback,
         }
         with open("result.json", "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2, default=str)
