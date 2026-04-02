@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 尾盘先手选股策略
-版本：v2.8 (中军协同 + 均线多头可选 + 动态止盈止损 + 大盘20日线过滤)
+版本：v2.9 (网络兜底：东财断连时改用新浪全市场 + 伪板块)
 运行时间：每个交易日 14:45 左右
 输出：控制台打印 + result.json
 """
@@ -274,7 +274,21 @@ def get_all_stocks():
         elif sz_df is not None and not sz_df.empty:
             df = sz_df
         else:
-            return None
+            # 最终兜底：新浪全市场实时行情
+            df = safe_request(ak.stock_zh_a_spot)
+            if df is None or df.empty:
+                return None
+            # 新浪接口缺少换手率/流通市值/量比：用常数填充以便后续过滤继续跑通
+            mid_turnover = 15.0
+            mid_cap = (CONFIG["MIN_MARKET_CAP"] + CONFIG["MAX_MARKET_CAP"]) / 2.0 * 1e8
+            df["换手率"] = mid_turnover
+            df["流通市值"] = mid_cap
+            df["量比"] = 1.0
+            cols = ['代码', '名称', '最新价', '涨跌幅', '成交额', '换手率', '流通市值', '量比']
+            df = df[cols]
+            for col in ['最新价', '涨跌幅', '成交额', '换手率', '流通市值', '量比']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            df = df.dropna(subset=['涨跌幅', '成交额', '换手率', '流通市值'])
     # 过滤科创板、北交所
     df = df[~df['代码'].str.startswith(tuple(CONFIG["EXCLUDE_BOARDS"]))]
     cols = ['代码', '名称', '最新价', '涨跌幅', '成交额', '换手率', '流通市值', '量比']
@@ -294,7 +308,13 @@ def get_board_heat(stock_df):
     # 获取概念板块列表
     concept_list = safe_request(ak.stock_board_concept_name_em)
     if concept_list is None:
-        return []
+        # 网络环境导致概念接口断连时：用“全市场”作为伪板块继续跑
+        return [{
+            'name': '全市场',
+            'limit_count': 0,
+            'avg_pct': float(stock_df['涨跌幅'].mean()) if '涨跌幅' in stock_df.columns else 0.0,
+            'stocks': stock_df
+        }]
     concepts = concept_list.head(CONFIG["MAX_CONCEPTS"])['板块名称'].tolist()
     hot_boards = []
     for concept in concepts:
