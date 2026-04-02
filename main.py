@@ -259,10 +259,22 @@ def get_dynamic_config(market_vol):
 
 
 def get_all_stocks():
-    """获取沪深A股实时行情，过滤科创板/北交所，含量比"""
+    """获取沪深A股实时行情，过滤科创板/北交所，含量比。
+    说明：在部分网络环境下 `stock_zh_a_spot_em` 可能断连，
+    此时自动降级为 `stock_sh_a_spot_em` + `stock_sz_a_spot_em` 合并。"""
     df = safe_request(ak.stock_zh_a_spot_em)
     if df is None:
-        return None
+        # 降级：分开拉沪市/深市，减少单次请求体量与潜在拦截
+        sh_df = safe_request(ak.stock_sh_a_spot_em)
+        sz_df = safe_request(ak.stock_sz_a_spot_em)
+        if sh_df is not None and sz_df is not None and not sh_df.empty and not sz_df.empty:
+            df = pd.concat([sh_df, sz_df], ignore_index=True)
+        elif sh_df is not None and not sh_df.empty:
+            df = sh_df
+        elif sz_df is not None and not sz_df.empty:
+            df = sz_df
+        else:
+            return None
     # 过滤科创板、北交所
     df = df[~df['代码'].str.startswith(tuple(CONFIG["EXCLUDE_BOARDS"]))]
     cols = ['代码', '名称', '最新价', '涨跌幅', '成交额', '换手率', '流通市值', '量比']
