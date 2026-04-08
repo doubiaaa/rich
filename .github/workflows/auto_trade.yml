@@ -2,7 +2,7 @@ name: 尾盘选股自动运行
 
 on:
   schedule:
-    - cron: '45 6 * * 1-5'     # 每日14:45（北京时间）运行
+    # - cron: '45 6 * * 1-5'     # 每日14:45（北京时间）运行
   workflow_dispatch:
 
 jobs:
